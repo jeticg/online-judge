@@ -12,7 +12,7 @@ from django.utils.translation import gettext_lazy as _, ungettext
 from reversion.admin import VersionAdmin
 
 from django_ace import AceWidget
-from judge.models import Contest, ContestProblem, ContestSubmission, Profile, Rating
+from judge.models import Contest, ContestProblem, ContestSubmission, Profile, Rating, Submission
 from judge.ratings import rate_contest
 from judge.utils.views import NoBatchDeleteMixin
 from judge.widgets import AdminHeavySelect2MultipleWidget, AdminHeavySelect2Widget, AdminMartorWidget, \
@@ -139,6 +139,10 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
             for action in ('make_visible', 'make_hidden'):
                 actions[action] = self.get_action(action)
 
+        if request.user.has_perm('judge.contest_lock'):
+            for action in ('set_locked', 'set_unlocked'):
+                actions[action] = self.get_action(action)
+
         return actions
 
     def get_queryset(self, request):
@@ -212,12 +216,52 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
                                              count) % count)
     make_hidden.short_description = _('Mark contests as hidden')
 
+    def set_locked(self, request, queryset):
+        for row in queryset:
+            self.set_is_locked(row, True)
+        count = queryset.count()
+        self.message_user(request, ungettext('%d contest successfully locked.',
+                                             '%d contests successfully locked.',
+                                             count) % count)
+    set_locked.short_description = _('Lock contest submissions')
+
+    def set_unlocked(self, request, queryset):
+        for row in queryset:
+            self.set_is_locked(row, False)
+        count = queryset.count()
+        self.message_user(request, ungettext('%d contest successfully unlocked.',
+                                             '%d contests successfully unlocked.',
+                                             count) % count)
+    set_unlocked.short_description = _('Unlock contest submissions')
+
+    def set_is_locked(self, contest, is_locked):
+        with transaction.atomic():
+            contest.is_locked = is_locked
+            contest.save()
+            Submission.objects.filter(contest_object=contest).update(is_locked=is_locked)
+
     def get_urls(self):
         return [
             url(r'^rate/all/$', self.rate_all_view, name='judge_contest_rate_all'),
             url(r'^(\d+)/rate/$', self.rate_view, name='judge_contest_rate'),
             url(r'^(\d+)/judge/(\d+)/$', self.rejudge_view, name='judge_contest_rejudge'),
+            url(r'^(\d+)/lock/$', self.lock_view, name='judge_contest_lock'),
+            url(r'^(\d+)/unlock/$', self.unlock_view, name='judge_contest_unlock'),
         ] + super(ContestAdmin, self).get_urls()
+
+    def lock_view(self, request, id):
+        if not request.user.has_perm('judge.contest_lock'):
+            raise PermissionDenied()
+        contest = get_object_or_404(Contest, id=id)
+        self.set_is_locked(contest, True)
+        return HttpResponseRedirect(reverse('admin:judge_contest_change', args=(id,)))
+
+    def unlock_view(self, request, id):
+        if not request.user.has_perm('judge.contest_lock'):
+            raise PermissionDenied()
+        contest = get_object_or_404(Contest, id=id)
+        self.set_is_locked(contest, False)
+        return HttpResponseRedirect(reverse('admin:judge_contest_change', args=(id,)))
 
     def rejudge_view(self, request, contest_id, problem_id):
         queryset = ContestSubmission.objects.filter(problem_id=problem_id).select_related('submission')
